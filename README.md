@@ -304,7 +304,66 @@ Validar consulta
                    END
 ```
 
+## Ejemplos de rutas del grafo
+
+El agente puede seguir diferentes rutas dependiendo de la consulta del usuario.
+
+**Ruta 1** — Consulta válida sin herramienta
+
+Cuando la consulta está relacionada con seguros, pero no necesita consultar un siniestro concreto:
+
+Flujo:
+
+START → Validar → Chatbot → Finalizar → END
+
+Ejemplo:
+
+Tú: ¿Qué documentación necesito para dar un parte?
+
+Llamadas a herramientas: 0
+
+**Ruta 2** — Consulta válida con herramienta
+
+Cuando el usuario pregunta por un siniestro concreto, el agente utiliza la herramienta correspondiente:
+
+Flujo:
+
+START → Validar → Chatbot → Tools → Chatbot → Finalizar → END
+
+Ejemplo:
+
+Tú: ¿Cuál es el estado del siniestro SIN-1001?
+
+Llamadas a herramientas: 1
+
+La herramienta devuelve la información del siniestro y el agente continúa el flujo hasta la finalización.
+
+**Ruta 3** — Consulta no válida
+
+Cuando la consulta no está relacionada con seguros de automóvil, el agente no utiliza herramientas y termina mediante el nodo de reinicio:
+
+Flujo:
+
+START → Validar → Reiniciar → END
+
+Ejemplo:
+
+Tú: ¿Cuál es la capital de Francia?
+
+El sistema identifica que la consulta está fuera del ámbito del asistente y solicita una nueva consulta relacionada con seguros de automóvil.
+
+**Control de terminación**
+
+Para evitar bucles de llamadas a herramientas, el agente establece un máximo de 2 llamadas por turno.
+
+Si se alcanza este límite, el flujo pasa al nodo finalizar:
+
+Flujo:
+
+Chatbot → Tools → Chatbot → Tools → Finalizar → END
+
 ---
+
 
 # Instalación
 
