@@ -1,14 +1,22 @@
+
 import os
 
 from typing import Annotated
 from typing_extensions import TypedDict
 
 from dotenv import load_dotenv
+
+from langfuse import Langfuse
+from langfuse.langchain import CallbackHandler
+
+from enmascaramiento import mask_otel_spans
+
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     AIMessage,
+    SystemMessage,
     ToolMessage
 )
 
@@ -20,11 +28,58 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from herramientas import consultar_siniestro
 
 
+# --------------------------------------------------
+# CONFIGURACIÓN
+# --------------------------------------------------
+
 load_dotenv()
+
+NOMBRE_PROMPT = "asistente-seguros-auto"
+VERSION_PROMPT = int(os.getenv("PROMPT_VERSION", "1"))
+
+NOMBRE_MODELO = "openai/gpt-6-luna"
 
 
 # --------------------------------------------------
-# ESTADO
+# LANGFUSE Y ENMASCARAMIENTO
+# --------------------------------------------------
+
+langfuse = Langfuse(
+    mask_otel_spans=mask_otel_spans
+)
+
+langfuse_handler = CallbackHandler()
+
+
+# --------------------------------------------------
+# RECUPERACIÓN DEL PROMPT
+# --------------------------------------------------
+
+try:
+    prompt_obj = langfuse.get_prompt(
+        NOMBRE_PROMPT,
+        version=VERSION_PROMPT,
+        type="text"
+    )
+
+    SYSTEM_PROMPT = prompt_obj.prompt
+
+    print(
+        f"Prompt cargado: {NOMBRE_PROMPT}, "
+        f"versión {VERSION_PROMPT}"
+    )
+
+except Exception as error:
+    raise RuntimeError(
+        f"No se ha podido recuperar el prompt "
+        f"{NOMBRE_PROMPT}, versión {VERSION_PROMPT}. "
+        "Comprueba que existe en Langfuse y que "
+        "las credenciales están configuradas."
+    ) from error
+
+
+# --------------------------------------------------
+# ESTADO DEL GRAFO
 # --------------------------------------------------
 
 class Estado(TypedDict):
@@ -38,7 +93,7 @@ class Estado(TypedDict):
 # --------------------------------------------------
 
 modelo = ChatOpenAI(
-    model="openai/gpt-6-luna",
+    model=NOMBRE_MODELO,
     temperature=0.2,
     api_key=os.getenv("OPENROUTER_API_KEY"),
     base_url="https://openrouter.ai/api/v1"
@@ -46,7 +101,7 @@ modelo = ChatOpenAI(
 
 
 # --------------------------------------------------
-# MODELO + HERRAMIENTA
+# MODELO CON HERRAMIENTAS
 # --------------------------------------------------
 
 modelo_con_herramientas = modelo.bind_tools(
@@ -54,7 +109,7 @@ modelo_con_herramientas = modelo.bind_tools(
 )
 
 
-# --------------------------------------------------
+
 # NODO DE VALIDACIÓN
 # --------------------------------------------------
 
@@ -63,28 +118,49 @@ def validar(state: Estado):
     mensaje = state["messages"][-1].content.lower()
 
     palabras_validas = [
-    "siniestro",
-    "seguro",
-    "póliza",
-    "poliza",
-    "accidente",
-    "coche",
-    "auto",
-    "automóvil",
-    "automovil",
-    "parte",
-    "documentación",
-    "documentacion",
-    "cobertura",
-    "prima",
-    "franquicia",
-    "reparación",
-    "reparacion"
-]
+        "siniestro",
+        "seguro",
+        "póliza",
+        "poliza",
+        "accidente",
+        "coche",
+        "auto",
+        "automóvil",
+        "automovil",
+        "parte",
+        "documentación",
+        "documentacion",
+        "cobertura",
+        "coberturas",
+        "prima",
+        "franquicia",
+        "reparación",
+        "reparacion",
+        "estado",
+        "expediente",
+        "indemnización",
+        "indemnizacion",
+        "recibo",
+        "renovación",
+        "renovacion",
+        "asistencia",
+        "robo",
+        "incendio",
+        "lunas",
+        "defensa jurídica",
+        "defensa juridica",
+        "responsabilidad civil",
+        "daños propios",
+        "danos propios",
+        "terceros"
+    ]
 
-    es_valida = any(
-        palabra in mensaje
-        for palabra in palabras_validas
+    # También aceptamos identificadores como SIN-1002.
+    contiene_id_siniestro = "sin-" in mensaje
+
+    es_valida = (
+        contiene_id_siniestro
+        or any(palabra in mensaje for palabra in palabras_validas)
     )
 
     if not es_valida:
@@ -94,7 +170,8 @@ def validar(state: Estado):
                 AIMessage(
                     content=(
                         "La consulta no está relacionada "
-                        "con seguros de automóvil."
+                        "con seguros de automóvil. "
+                        "¿Necesitas ayuda con alguna consulta sobre seguros?"
                     )
                 )
             ]
@@ -103,6 +180,7 @@ def validar(state: Estado):
     return {
         "consulta_valida": True
     }
+
 
 # --------------------------------------------------
 # NODO DE REINICIO
@@ -123,15 +201,19 @@ def reiniciar(state: Estado):
     }
 
 
-
 # --------------------------------------------------
 # NODO CHATBOT
 # --------------------------------------------------
 
 def chatbot(state: Estado):
 
+    mensajes = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        *state["messages"]
+    ]
+
     respuesta = modelo_con_herramientas.invoke(
-        state["messages"]
+        mensajes
     )
 
     return {
@@ -151,7 +233,6 @@ tool_node = ToolNode(
 def ejecutar_herramientas(state: Estado):
 
     try:
-
         resultado = tool_node.invoke(state)
 
         numero_llamadas = len(
@@ -185,46 +266,46 @@ def ejecutar_herramientas(state: Estado):
         }
 
 
+
+
+
 # --------------------------------------------------
 # NODO FINALIZAR
 # --------------------------------------------------
 
 def finalizar(state: Estado):
 
-    # Si la consulta no es válida,
-    # mostramos directamente el mensaje de validación.
     if not state["consulta_valida"]:
         return {}
 
-    ultimo_mensaje = state["messages"][-1]
+    mensajes = state["messages"]
 
-    # Si la última respuesta procede de una herramienta,
-    # utilizamos directamente la información obtenida.
-    if isinstance(ultimo_mensaje, ToolMessage):
+    # Localizar el último mensaje del usuario.
+    ultimo_usuario = None
 
-        return {
-            "messages": [
-                AIMessage(
-                    content=ultimo_mensaje.content
-                )
-            ]
-        }
+    for i in range(len(mensajes) - 1, -1, -1):
+        if isinstance(mensajes[i], HumanMessage):
+            ultimo_usuario = i
+            break
 
-    # Si no se ha utilizado ninguna herramienta,
-    # dejamos que el modelo responda normalmente.
-    respuesta = modelo.invoke(
-        [
-            (
-                "system",
-                "Eres un asistente especializado "
-                "en seguros de automóvil. "
-                "Responde de forma clara, breve y profesional. "
-                "No inventes información. "
-                "Responde únicamente a la pregunta planteada."
-            ),
-            *state["messages"]
-        ]
-    )
+    # Buscar una respuesta de herramienta SOLO en la consulta actual.
+    if ultimo_usuario is not None:
+        for mensaje in reversed(mensajes[ultimo_usuario + 1:]):
+            if isinstance(mensaje, ToolMessage):
+                return {
+                    "messages": [
+                        AIMessage(content=mensaje.content)
+                    ]
+                }
+
+    # Si la consulta actual no ha utilizado herramientas,
+    # generar una respuesta normal del modelo.
+    mensajes_modelo = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        *mensajes
+    ]
+
+    respuesta = modelo.invoke(mensajes_modelo)
 
     return {
         "messages": [respuesta]
@@ -242,24 +323,21 @@ def decidir_validacion(state: Estado):
 
     return "reiniciar"
 
+
 # --------------------------------------------------
 # DECISIÓN DEL SIGUIENTE PASO
 # --------------------------------------------------
 
 def decidir_siguiente_paso(state: Estado):
 
-    # Si ya hemos realizado 2 llamadas,
-    # pasamos al nodo de finalización.
     if state["llamadas_herramienta"] >= 2:
         return "finalizar"
 
     ultima_respuesta = state["messages"][-1]
 
-    # Si el modelo solicita una herramienta
     if getattr(ultima_respuesta, "tool_calls", None):
         return "tools"
 
-    # Si no necesita herramientas
     return "finalizar"
 
 
@@ -269,43 +347,13 @@ def decidir_siguiente_paso(state: Estado):
 
 builder = StateGraph(Estado)
 
+builder.add_node("validar", validar)
+builder.add_node("reiniciar", reiniciar)
+builder.add_node("chatbot", chatbot)
+builder.add_node("tools", ejecutar_herramientas)
+builder.add_node("finalizar", finalizar)
 
-builder.add_node(
-    "validar",
-    validar
-)
-
-builder.add_node(
-    "reiniciar",
-    reiniciar
-)
-
-
-builder.add_node(
-    "chatbot",
-    chatbot
-)
-
-builder.add_node(
-    "tools",
-    ejecutar_herramientas
-)
-
-builder.add_node(
-    "finalizar",
-    finalizar
-)
-
-
-# Inicio → validación
-
-builder.add_edge(
-    START,
-    "validar"
-)
-
-
-# Validación → chatbot o finalizar
+builder.add_edge(START, "validar")
 
 builder.add_conditional_edges(
     "validar",
@@ -316,13 +364,7 @@ builder.add_conditional_edges(
     }
 )
 
-builder.add_edge(
-    "reiniciar",
-    END
-)
-
-
-# Chatbot → tools o finalizar
+builder.add_edge("reiniciar", END)
 
 builder.add_conditional_edges(
     "chatbot",
@@ -333,25 +375,12 @@ builder.add_conditional_edges(
     }
 )
 
-
-# Tools → chatbot
-
-builder.add_edge(
-    "tools",
-    "chatbot"
-)
-
-
-# Finalizar → END
-
-builder.add_edge(
-    "finalizar",
-    END
-)
+builder.add_edge("tools", "chatbot")
+builder.add_edge("finalizar", END)
 
 
 # --------------------------------------------------
-# MEMORIA SQLITE
+# MEMORIA Y EJECUCIÓN
 # --------------------------------------------------
 
 with SqliteSaver.from_conn_string("memoria.db") as checkpointer:
@@ -359,11 +388,6 @@ with SqliteSaver.from_conn_string("memoria.db") as checkpointer:
     app = builder.compile(
         checkpointer=checkpointer
     )
-
-
-    # --------------------------------------------------
-    # EJECUCIÓN DEL CHAT
-    # --------------------------------------------------
 
     if __name__ == "__main__":
 
@@ -385,9 +409,7 @@ with SqliteSaver.from_conn_string("memoria.db") as checkpointer:
             resultado = app.invoke(
                 {
                     "messages": [
-                        HumanMessage(
-                            content=consulta
-                        )
+                        HumanMessage(content=consulta)
                     ],
                     "llamadas_herramienta": 0,
                     "consulta_valida": False
@@ -395,16 +417,22 @@ with SqliteSaver.from_conn_string("memoria.db") as checkpointer:
                 config={
                     "configurable": {
                         "thread_id": thread_id
+                    },
+                    "callbacks": [langfuse_handler],
+                    "run_name": "chatbot-seguros-langgraph",
+                    "metadata": {
+                        "prompt_name": NOMBRE_PROMPT,
+                        "prompt_version": VERSION_PROMPT,
+                        "model_name": NOMBRE_MODELO,
+                        "conversation_id": thread_id
                     }
                 }
             )
 
             print("\nAsistente:")
-            print(
-                resultado["messages"][-1].content
-            )
+            print(resultado["messages"][-1].content)
 
             print(
-                f"\nLlamadas a herramientas: "
+                "\nLlamadas a herramientas: "
                 f"{resultado['llamadas_herramienta']}"
             )

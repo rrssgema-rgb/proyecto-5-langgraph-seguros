@@ -26,15 +26,18 @@ siniestros = {
 }
 
 
+
 # Definir la función como herramienta
 @tool
 def consultar_siniestro(numero_siniestro: str):
     """
     Consulta el estado de un siniestro de automóvil.
+    Si el número no existe, informa de que no se ha encontrado.
     """
 
-    if numero_siniestro in siniestros:
+    numero_siniestro = numero_siniestro.strip().upper()
 
+    if numero_siniestro in siniestros:
         siniestro = siniestros[numero_siniestro]
 
         return (
@@ -43,10 +46,11 @@ def consultar_siniestro(numero_siniestro: str):
             f"{siniestro['descripcion']}."
         )
 
-    return {
-        "estado": "No encontrado",
-        "descripcion": "No existe ningún siniestro con ese número"
-    }
+    return (
+        f"No se ha encontrado el siniestro {numero_siniestro}. "
+        "No existe ningún siniestro con ese número en los datos de prueba."
+    )
+
 
 
 # Crear el modelo
